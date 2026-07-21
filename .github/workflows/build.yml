@@ -52,12 +52,22 @@ jobs:
 
           chmod +x "$MKSPIFFS" "$ESPTOOL" || true
 
+      - name: Debug build directory
+        run: |
+          echo "Listing yoRadio/build:"
+          ls -R yoRadio/build || true
+
       - name: Read partition offsets from the compiled partition table
         id: parts
         run: |
-          BUILD_DIR=$(find yoRadio/build -maxdepth 1 -mindepth 1 -type d | head -1)
+          BUILD_DIR=$(find yoRadio/build -type d -name "esp32.esp32.esp32" | head -1)
+          if [ -z "$BUILD_DIR" ]; then
+            BUILD_DIR=$(find yoRadio/build -maxdepth 2 -mindepth 1 -type d | head -1)
+          fi
 
-          python3 "${{ steps.tools.outputs.genpart }}" "$BUILD_DIR"/*.partitions.bin > partitions.csv
+          echo "Using BUILD_DIR: $BUILD_DIR"
+
+          python3 "${{ steps.tools.outputs.genpart }}" --verify "$BUILD_DIR"/*.partitions.bin > partitions.csv
           cat partitions.csv
 
           APP_OFFSET=$(grep -E "^app0|^factory" partitions.csv | head -1 | awk -F',' '{gsub(/ /,"",$4); print $4}')
@@ -66,7 +76,7 @@ jobs:
 
           echo "build_dir=$BUILD_DIR" >> $GITHUB_OUTPUT
           echo "app_offset=$APP_OFFSET" >> $GITHUB_OUTPUT
-          echo "FFS_OFFSET" >> $GITHUB_OUTPUT
+          echo "spiffs_offset=$SPIFFS_OFFSET" >> $GITHUB_OUTPUT
           echo "spiffs_size=$SPIFFS_SIZE" >> $GITHUB_OUTPUT
 
       - name: Build SPIFFS image from yoRadio/data
@@ -75,23 +85,4 @@ jobs:
           SIZE_BYTES=$(echo "$SIZE_STR" | sed 's/K$//' | awk '{print $1 * 1024}')
           echo "SPIFFS size in bytes: $SIZE_BYTES"
 
-          "${{ steps.tools.outputs.mkspiffs }}" -c yoRadio/data -b 4096 -p 256 \
-            -s $SIZE_BYTES spiffs.bin
-
-      - name: Merge bootloader + partitions + app + spiffs into one .bin
-        run: |
-          BUILD_DIR="${{ steps.parts.outputs.build_dir }}"
-
-          python3 "${{ steps.tools.outputs.esptool }}" --chip esp32 merge_bin \
-            -o yoRadio-merged-firmware.bin \
-            --flash_mode dio --flash_freq 40m --flash_size 4MB \
-            0x1000 "$BUILD_DIR"/*.bootloader.bin \
-            0x8000 "$BUILD_DIR"/*.partitions.bin \
-            ${{ steps.parts.outputs.app_offset }} "$BUILD_DIR"/*.ino.bin \
-            ${{ steps.parts.outputs.spiffs_offset }} spiffs.bin
-
-      - name: Upload merged firmware
-        uses: actions/upload-artifact@v4
-        with:
-          name: yoRadio-merged-firmware
-          path: yoRadio-merged-firmware.bin
+          "${{ steps.tools.outputs.mk
