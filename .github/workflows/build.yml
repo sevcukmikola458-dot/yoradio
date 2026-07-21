@@ -1,88 +1,69 @@
-name: Build yoRadio firmware (single merged .bin)
+name: Build ESP32 Firmware
 
 on:
-  workflow_dispatch:
   push:
-    branches: [ main ]
+    branches:
+      - main
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install arduino-cli
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
-          echo "$PWD/bin" >> $GITHUB_PATH
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-      - name: Install ESP32 core (pinned to 2.0.14)
+      - name: Install PlatformIO
         run: |
-          arduino-cli config init
-          arduino-cli config add board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
-          arduino-cli core update-index
-          arduino-cli core install esp32:esp32@2.0.14
+          pip install -U platformio
+          pio pkg install
 
-      - name: Install required libraries
+      - name: Build firmware
         run: |
-          arduino-cli lib install "OneButton"
+          pio run
+          ls -la .pio/build/esp32dev/
 
-      - name: Compile firmware (app + bootloader + partitions)
+      - name: Extract firmware path
+        id: firmware
         run: |
-          arduino-cli compile \
-            --fqbn esp32:esp32:esp32 \
-            --export-binaries \
-            --build-property build.partitions=default \
-            ./yoRadio
+          FW=$(find .pio/build/esp32dev/ -name "firmware.bin")
+          echo "firmware=$FW" >> $GITHUB_OUTPUT
+          echo "Found firmware: $FW"
 
-      - name: Locate build tools bundled with the ESP32 core
+      - name: Install mkspiffs
         id: tools
         run: |
-          CORE_DIR=$(find ~/.arduino15/packages/esp32/hardware/esp32 -maxdepth 1 -mindepth 1 -type d | head -1)
-          MKSPIFFS=$(find ~/.arduino15/packages/esp32/tools/mkspiffs -name "mkspiffs*" -type f | head -1)
-          ESPTOOL=$(find ~/.arduino15/packages/esp32/tools/esptool_py -name "esptool*" -type f | head -1)
-          GENPART=$(find "$CORE_DIR" -name "gen_esp32part.py" | head -1)
+          sudo apt-get update
+          sudo apt-get install -y mkspiffs
+          MK=$(which mkspiffs)
+          echo "mkspiffs=$MK" >> $GITHUB_OUTPUT
 
-          echo "core_dir=$CORE_DIR" >> $GITHUB_OUTPUT
-          echo "mkspiffs=$MKSPIFFS" >> $GITHUB_OUTPUT
-          echo "esptool=$ESPTOOL" >> $GITHUB_OUTPUT
-          echo "genpart=$GENPART" >> $GITHUB_OUTPUT
-
-          chmod +x "$MKSPIFFS" "$ESPTOOL" || true
-
-      - name: Debug build directory
-        run: |
-          echo "Listing yoRadio/build:"
-          ls -R yoRadio/build || true
-
-      - name: Read partition offsets from the compiled partition table
+      - name: Read SPIFFS partition size
         id: parts
         run: |
-          BUILD_DIR=$(find yoRadio/build -type d -name "esp32.esp32.esp32" | head -1)
-          if [ -z "$BUILD_DIR" ]; then
-            BUILD_DIR=$(find yoRadio/build -maxdepth 2 -mindepth 1 -type d | head -1)
-          fi
+          SIZE=$(grep -i spiffs partitions.csv | awk -F',' '{print $4}')
+          echo "spiffs_size=$SIZE" >> $GITHUB_OUTPUT
+          echo "SPIFFS size: $SIZE"
 
-          echo "Using BUILD_DIR: $BUILD_DIR"
-
-          python3 "${{ steps.tools.outputs.genpart }}" --verify "$BUILD_DIR"/*.partitions.bin > partitions.csv
-          cat partitions.csv
-
-          APP_OFFSET=$(grep -E "^app0|^factory" partitions.csv | head -1 | awk -F',' '{gsub(/ /,"",$4); print $4}')
-          SPIFFS_OFFSET=$(grep "spiffs" partitions.csv | awk -F',' '{gsub(/ /,"",$4); print $4}')
-          SPIFFS_SIZE=$(grep "spiffs" partitions.csv | awk -F',' '{gsub(/ /,"",$5); print $5}')
-
-          echo "build_dir=$BUILD_DIR" >> $GITHUB_OUTPUT
-          echo "app_offset=$APP_OFFSET" >> $GITHUB_OUTPUT
-          echo "spiffs_offset=$SPIFFS_OFFSET" >> $GITHUB_OUTPUT
-          echo "spiffs_size=$SPIFFS_SIZE" >> $GITHUB_OUTPUT
-
-      - name: Build SPIFFS image from yoRadio/data
+      - name: Build SPIFFS image from yoRadio
         run: |
           SIZE_STR="${{ steps.parts.outputs.spiffs_size }}"
-          SIZE_BYTES=$(echo "$SIZE_STR" | sed 's/K$//' | awk '{print $1 * 1024}')
+          SIZE_BYTES=$(echo "$SIZE_STR" | tr -d '\r')
           echo "SPIFFS size in bytes: $SIZE_BYTES"
 
-          "${{ steps.tools.outputs.mk
+          ${{ steps.tools.outputs.mkspiffs }} -c data -b "$SIZE_BYTES" yoRadio/spiffs.bin
+          ls -la yoRadio/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-build
+          path: |
+            ${{ steps.firmware.outputs.firmware }}
+            yoRadio/spiffs.bin
