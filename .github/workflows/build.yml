@@ -1,1 +1,88 @@
+name: Build yoRadio firmware (single merged .bin)
 
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install arduino-cli
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+          echo "$PWD/bin" >> $GITHUB_PATH
+
+      # I2S_INTERNAL (internal DAC) only works with esp32 core version == 2.0.0
+      - name: Install ESP32 core (pinned to 2.0.0)
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@2.0.0
+
+      - name: Install required libraries
+        run: |
+          arduino-cli lib install "OneButton"
+
+      # Make sure your myoptions.h is committed at yoRadio/myoptions.h before running
+      - name: Compile firmware (app + bootloader + partitions)
+        run: |
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32 \
+            --export-binaries \
+            --build-property build.partitions=default \
+            ./yoRadio
+
+      - name: Locate build tools bundled with the ESP32 core
+        id: tools
+        run: |
+          CORE_DIR=$(find ~/.arduino15/packages/esp32/hardware/esp32 -maxdepth 1 -mindepth 1 -type d | head -1)
+          MKSPIFFS=$(find ~/.arduino15/packages/esp32/tools/mkspiffs -name "mkspiffs*" -type f | head -1)
+          ESPTOOL=$(find ~/.arduino15/packages/esp32/tools/esptool_py -name "esptool*" -type f | head -1)
+          GENPART=$(find "$CORE_DIR" -name "gen_esp32part.py" | head -1)
+          echo "core_dir=$CORE_DIR" >> $GITHUB_OUTPUT
+          echo "mkspiffs=$MKSPIFFS" >> $GITHUB_OUTPUT
+          echo "esptool=$ESPTOOL" >> $GITHUB_OUTPUT
+          echo "genpart=$GENPART" >> $GITHUB_OUTPUT
+          chmod +x "$MKSPIFFS" "$ESPTOOL" || true
+
+      - name: Read partition offsets from the compiled partition table
+        id: parts
+        run: |
+          BUILD_DIR=$(find yoRadio/build -maxdepth 1 -mindepth 1 -type d | head -1)
+          python3 "${{ steps.tools.outputs.genpart }}" "$BUILD_DIR"/*.partitions.bin > partitions.csv
+          cat partitions.csv
+          APP_OFFSET=$(grep -E "^app0|^factory" partitions.csv | head -1 | awk -F',' '{gsub(/ /,"",$4); print $4}')
+          SPIFFS_OFFSET=$(grep "spiffs" partitions.csv | awk -F',' '{gsub(/ /,"",$4); print $4}')
+          SPIFFS_SIZE=$(grep "spiffs" partitions.csv | awk -F',' '{gsub(/ /,"",$5); print $5}')
+          echo "build_dir=$BUILD_DIR" >> $GITHUB_OUTPUT
+          echo "app_offset=$APP_OFFSET" >> $GITHUB_OUTPUT
+          echo "spiffs_offset=$SPIFFS_OFFSET" >> $GITHUB_OUTPUT
+          echo "spiffs_size=$SPIFFS_SIZE" >> $GITHUB_OUTPUT
+
+      - name: Build SPIFFS image from yoRadio/data
+        run: |
+          "${{ steps.tools.outputs.mkspiffs }}" -c yoRadio/data -b 4096 -p 256 \
+            -s ${{ steps.parts.outputs.spiffs_size }} spiffs.bin
+
+      - name: Merge bootloader + partitions + app + spiffs into one .bin
+        run: |
+          BUILD_DIR="${{ steps.parts.outputs.build_dir }}"
+          python3 "${{ steps.tools.outputs.esptool }}" --chip esp32 merge_bin \
+            -o yoRadio-merged-firmware.bin \
+            --flash_mode dio --flash_freq 40m --flash_size 4MB \
+            0x1000 "$BUILD_DIR"/*.bootloader.bin \
+            0x8000 "$BUILD_DIR"/*.partitions.bin \
+            ${{ steps.parts.outputs.app_offset }} "$BUILD_DIR"/*.ino.bin \
+            ${{ steps.parts.outputs.spiffs_offset }} spiffs.bin
+
+      - name: Upload merged firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: yoRadio-merged-firmware
+          path: yoRadio-merged-firmware.bin
