@@ -21,8 +21,8 @@ jobs:
 
       - name: Install PlatformIO
         run: |
-          pip install -U platformio
-          pio pkg install
+          python -m pip install --upgrade pip setuptools wheel
+          pip install -U platformio --no-cache-dir
 
       - name: Build firmware
         run: |
