@@ -8,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -43,24 +44,29 @@ jobs:
           MKSPIFFS=$(find ~/.arduino15/packages/esp32/tools/mkspiffs -name "mkspiffs*" -type f | head -1)
           ESPTOOL=$(find ~/.arduino15/packages/esp32/tools/esptool_py -name "esptool*" -type f | head -1)
           GENPART=$(find "$CORE_DIR" -name "gen_esp32part.py" | head -1)
+
           echo "core_dir=$CORE_DIR" >> $GITHUB_OUTPUT
           echo "mkspiffs=$MKSPIFFS" >> $GITHUB_OUTPUT
           echo "esptool=$ESPTOOL" >> $GITHUB_OUTPUT
           echo "genpart=$GENPART" >> $GITHUB_OUTPUT
+
           chmod +x "$MKSPIFFS" "$ESPTOOL" || true
 
       - name: Read partition offsets from the compiled partition table
         id: parts
         run: |
           BUILD_DIR=$(find yoRadio/build -maxdepth 1 -mindepth 1 -type d | head -1)
+
           python3 "${{ steps.tools.outputs.genpart }}" "$BUILD_DIR"/*.partitions.bin > partitions.csv
           cat partitions.csv
+
           APP_OFFSET=$(grep -E "^app0|^factory" partitions.csv | head -1 | awk -F',' '{gsub(/ /,"",$4); print $4}')
           SPIFFS_OFFSET=$(grep "spiffs" partitions.csv | awk -F',' '{gsub(/ /,"",$4); print $4}')
           SPIFFS_SIZE=$(grep "spiffs" partitions.csv | awk -F',' '{gsub(/ /,"",$5); print $5}')
+
           echo "build_dir=$BUILD_DIR" >> $GITHUB_OUTPUT
           echo "app_offset=$APP_OFFSET" >> $GITHUB_OUTPUT
-          echo "spiffs_offset=$SPIFFS_OFFSET" >> $GITHUB_OUTPUT
+          echo "FFS_OFFSET" >> $GITHUB_OUTPUT
           echo "spiffs_size=$SPIFFS_SIZE" >> $GITHUB_OUTPUT
 
       - name: Build SPIFFS image from yoRadio/data
@@ -69,12 +75,13 @@ jobs:
           SIZE_BYTES=$(echo "$SIZE_STR" | sed 's/K$//' | awk '{print $1 * 1024}')
           echo "SPIFFS size in bytes: $SIZE_BYTES"
 
-.tools.outputs.mkspiffs }}" -c yoRadio/data -b 4096 -p 256 \
+          "${{ steps.tools.outputs.mkspiffs }}" -c yoRadio/data -b 4096 -p 256 \
             -s $SIZE_BYTES spiffs.bin
 
       - name: Merge bootloader + partitions + app + spiffs into one .bin
         run: |
           BUILD_DIR="${{ steps.parts.outputs.build_dir }}"
+
           python3 "${{ steps.tools.outputs.esptool }}" --chip esp32 merge_bin \
             -o yoRadio-merged-firmware.bin \
             --flash_mode dio --flash_freq 40m --flash_size 4MB \
