@@ -65,8 +65,12 @@ jobs:
 
       - name: Build SPIFFS image from yoRadio/data
         run: |
-          "${{ steps.tools.outputs.mkspiffs }}" -c yoRadio/data -b 4096 -p 256 \
-            -s ${{ steps.parts.outputs.spiffs_size }} spiffs.bin
+          SIZE_STR="${{ steps.parts.outputs.spiffs_size }}"
+          SIZE_BYTES=$(echo "$SIZE_STR" | sed 's/K$//' | awk '{print $1 * 1024}')
+          echo "SPIFFS size in bytes: $SIZE_BYTES"
+
+.tools.outputs.mkspiffs }}" -c yoRadio/data -b 4096 -p 256 \
+            -s $SIZE_BYTES spiffs.bin
 
       - name: Merge bootloader + partitions + app + spiffs into one .bin
         run: |
